@@ -42,10 +42,21 @@ export function parseAuto(text: string): ParseResult {
   if (!t) return { decks: [], total: 0 };
 
   // JSON Anki/CrowdAnki
-  if (t.startsWith("{") && (t.includes('"__type__"') || t.includes('"note_models"') || t.includes('"notes"'))) {
-    try { return parseCrowdAnki(t); } catch { /* fallback */ }
+  if (t.startsWith("{") || t.startsWith("[")) {
+  try {
+    const obj = JSON.parse(t);
+    if (
+      obj &&
+      typeof obj === "object" &&
+      Array.isArray((obj as any).notes) &&
+      Array.isArray((obj as any).note_models)
+    ) {
+      return parseCrowdAnki(t);
+    }
+  } catch {
+    /* pas du JSON valide → on tente les autres parsers */
   }
-
+}
   // Format Q:/R:/======= DECK
   if (/^Q:\s/m.test(t) || /^DECK\s*:/im.test(t)) {
     return parseQR(t);
@@ -90,41 +101,104 @@ function parseCrowdAnki(text: string): ParseResult {
     let back = fields[1];
 
     if (model) {
-      const fill = (tpl: string) => {
-        let res = tpl;
-        for (let i = 0; i < model.fields.length; i++) {
-          const fname = model.fields[i];
-          const val = fields[i] || "";
-          res = res.replace(new RegExp(`\\{\\{\\s*${escapeRegex(fname)}\\s*\\}\\}`, "g"), val);
-        }
-        // Gère {{FrontSide}} présent dans les templates de réponse Anki
-        res = res.replace(/\{\{\s*FrontSide\s*\}\}/g, front);
-        return res;
-      };
+  // Map nom_de_champ → valeur (en respectant l'ordre de model.fields)
+  const fmap = new Map<string, string>();
+  for (let i = 0; i < model.fields.length; i++) {
+    const name = model.fields[i];
+    if (!name) continue;
+    fmap.set(name, (fields[i] ?? "").toString());
+  }
 
-      front = fill(model.qfmt);
-      let fullBack = fill(model.afmt);
+  // 1) On rend d'abord la question (sans FrontSide à ce stade)
+  front = renderAnkiTemplate(model.qfmt, fmap, "");
+  // 2) Puis la réponse, en passant la question rendue comme {{FrontSide}}
+  let fullBack = renderAnkiTemplate(model.afmt, fmap, front);
 
-      // Extrait le contenu après <hr id="answer"> (standard Anki)
-      const hrMatch = fullBack.match(/<hr[^>]*id=["']answer["'][^>]*>([\s\S]*)/i) ||
-                      fullBack.match(/<hr[^>]*>([\s\S]*)/i);
-      back = hrMatch ? hrMatch[1].trim() : fullBack;
-    }
+  // Extrait le contenu après <hr id="answer"> (avec OU sans guillemets : id=answer / id="answer")
+  const hrMatch =
+    fullBack.match(/<hr[^>]*\bid\s*=\s*["']?answer["']?[^>]*>([\s\S]*)/i) ||
+    fullBack.match(/<hr[^>]*>([\s\S]*)/i);
+  back = hrMatch ? hrMatch[1].trim() : fullBack;
+}
 
-    front = cleanAnkiHtml(front);
-    back = cleanAnkiHtml(back);
+   front = cleanAnkiHtml(front);
+back = cleanAnkiHtml(back);
 
-    if (front.trim() && back.trim()) {
-      cards.push({ front, back, tags: note.tags || [] });
-    }
+const visible = (s: string) =>
+  s.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim();
+
+if (visible(front).length > 0 && visible(back).length > 0) {
+  cards.push({ front, back, tags: note.tags || [] });
+}
   }
 
   return { decks: [{ folderName: deckName, cards }], total: cards.length };
 }
+// Rendu d'un template Anki :
+//  - {{FrontSide}}                       → contenu du recto déjà rendu
+//  - {{#Field}} ... {{/Field}}           → bloc affiché si le champ est non vide
+//  - {{^Field}} ... {{/Field}}           → bloc affiché si le champ est vide
+//  - {{Field}} / {{text:Field}} / {{cloze:Field}} / {{type:Field}} / {{hint:Field}}
+//                                        → valeur du champ
+//  - tout {{...}} restant                → supprimé (sinon ça pollue le texte)
+function renderAnkiTemplate(
+  tpl: string,
+  fields: Map<string, string>,
+  frontSide: string
+): string {
+  if (!tpl) return "";
+  let res = tpl;
 
+  // {{FrontSide}}
+  res = res.replace(/\{\{\s*FrontSide\s*\}\}/gi, frontSide);
+
+  const isFilled = (name: string) => {
+    const v = fields.get(name);
+    if (v == null) return false;
+    // considère "vide" = uniquement espaces / balises vides
+    const stripped = v.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim();
+    return stripped.length > 0;
+  };
+
+  // Sections conditionnelles, plusieurs passes pour gérer l'imbrication
+  for (let i = 0; i < 5; i++) {
+    const before = res;
+
+    // {{#Field}} ... {{/Field}}  → garder si non vide
+    res = res.replace(
+      /\{\{#\s*([A-Za-z0-9_:\- ]+?)\s*\}\}([\s\S]*?)\{\{\/\s*\1\s*\}\}/g,
+      (_, name: string, inner: string) => (isFilled(name.trim()) ? inner : "")
+    );
+
+    // {{^Field}} ... {{/Field}}  → garder si vide
+    res = res.replace(
+      /\{\{\^\s*([A-Za-z0-9_:\- ]+?)\s*\}\}([\s\S]*?)\{\{\/\s*\1\s*\}\}/g,
+      (_, name: string, inner: string) => (isFilled(name.trim()) ? "" : inner)
+    );
+
+    if (res === before) break;
+  }
+
+  // Champs simples : {{Field}} ou {{filtre:Field}} ou {{a:b:Field}}
+  res = res.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (whole, raw: string) => {
+    const parts = raw.split(":").map((s) => s.trim());
+    const name = parts[parts.length - 1];
+    if (fields.has(name)) return fields.get(name) || "";
+    // Cas spécial : {{text:Field}} sans Field connu → vide
+    return "";
+  });
+
+  return res;
+}
 function cleanAnkiHtml(s: string): string {
   let out = s
     .replace(/\r\n/g, "\n")
+    // Sécurité : si un template Anki résiduel a survécu, on le supprime
+    .replace(/\{\{[#\/^][^}]+\}\}/g, "")   // {{#Field}}, {{/Field}}, {{^Field}}
+    .replace(/\{\{\s*FrontSide\s*\}\}/gi, "")
+    .replace(/\{\{[^}]+\}\}/g, "")         // tout {{...}} restant
+    // Supprime explicitement le séparateur Anki <hr id=answer>
+    .replace(/<hr[^>]*\bid\s*=\s*["']?answer["']?[^>]*>/gi, "\n")
     // Images → [image:nom_fichier]
     .replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (_, src) => `[image:${src.split("/").pop() || src}]`)
     // Sauts de ligne
