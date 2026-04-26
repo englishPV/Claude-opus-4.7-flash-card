@@ -2,7 +2,7 @@ import { useState, useMemo } from "react";
 import { useStore } from "../lib/store";
 import { parseAuto, toCard } from "../lib/parser";
 import type { UUID } from "../lib/types";
-import { X, Sparkles, Copy } from "./icons";
+import { X, Sparkles, Copy, Upload } from "./icons";
 
 const AI_PROMPT = `Tu es un assistant qui convertit du contenu de cours en flashcards au format suivant (à coller tel quel) :
 
@@ -98,8 +98,22 @@ export function ImportDialog({ folderId, onClose }: Props) {
               onChange={e => setText(e.target.value)}
               rows={20}
               className="w-full p-3 rounded-lg border border-app bg-soft font-mono text-xs resize-y"
-              placeholder="Format Markdown (### Carte 1 [M]...), Q:/R:, ou pipe (id|fr|en|tag) — détecté auto."
+              placeholder="Format Markdown (### Carte 1 [M]...), Q:/R:, pipe, ou JSON Anki."
             />
+            <div className="flex items-center gap-2 mt-2">
+              <label className="btn btn-ghost text-xs gap-1 cursor-pointer">
+                <Upload /> Importer un fichier .json (Anki / CrowdAnki)
+                <input type="file" accept=".json,.colpkg,.anki2" className="hidden" onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) {
+                    const reader = new FileReader();
+                    reader.onload = () => { setText(String(reader.result)); };
+                    reader.readAsText(f);
+                  }
+                  e.currentTarget.value = "";
+                }} />
+              </label>
+            </div>
             <label className="flex items-center gap-2 mt-2 text-xs text-soft">
               <input type="checkbox" checked={createSubfolders} onChange={e => setCreateSubfolders(e.target.checked)} />
               Créer un sous-dossier par deck (si plusieurs # détectés)

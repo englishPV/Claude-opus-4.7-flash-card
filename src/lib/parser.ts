@@ -41,6 +41,11 @@ export function parseAuto(text: string): ParseResult {
   const t = text.trim();
   if (!t) return { decks: [], total: 0 };
 
+  // JSON Anki/CrowdAnki
+  if (t.startsWith("{") && (t.includes('"__type__"') || t.includes('"note_models"') || t.includes('"notes"'))) {
+    try { return parseCrowdAnki(t); } catch { /* fallback */ }
+  }
+
   // Format Q:/R:/======= DECK
   if (/^Q:\s/m.test(t) || /^DECK\s*:/im.test(t)) {
     return parseQR(t);
@@ -55,6 +60,100 @@ export function parseAuto(text: string): ParseResult {
   }
   // fallback: ligne par ligne front | back
   return parseSimplePipe(t);
+}
+
+// ─── CrowdAnki / Anki JSON ─────────────────────────────────────────
+function parseCrowdAnki(text: string): ParseResult {
+  const json = JSON.parse(text);
+  const deckName: string = json.name || "Import Anki";
+  const notes: any[] = json.notes || [];
+
+  // Construit une map note_model_uuid → template (qfmt / afmt)
+  const models = new Map<string, { qfmt: string; afmt: string; fields: string[] }>();
+  for (const nm of (json.note_models || [])) {
+    const fieldNames = (nm.flds || []).map((f: any) => f.name || "");
+    for (const tmpl of (nm.tmpls || [])) {
+      models.set(nm.crowdanki_uuid, {
+        qfmt: tmpl.qfmt || "{{Front}}",
+        afmt: tmpl.afmt || "{{Back}}",
+        fields: fieldNames,
+      });
+    }
+  }
+
+  const cards: ParsedCard[] = [];
+  for (const note of notes) {
+    const fields: string[] = note.fields || [];
+    if (fields.length < 2) continue;
+
+    const model = models.get(note.note_model_uuid);
+
+    // Fonction pour remplacer {{FieldName}} dans un template
+    const fillTemplate = (template: string) => {
+      let result = template;
+      if (model) {
+        for (let i = 0; i < model.fields.length && i < fields.length; i++) {
+          result = result.replace(new RegExp(`\\{\\{\\s*${escapeRegex(model.fields[i])}\\s*\\}\\}`, "g"), fields[i]);
+        }
+      }
+      // Fallback : si les {{...}} ne sont pas résolus, on met les fields bruts
+      if (/\{\{/.test(result)) {
+        result = fields[0]; // juste le front brut
+      }
+      return result;
+    };
+
+    let front: string;
+    let back: string;
+
+    if (model) {
+      front = fillTemplate(model.qfmt);
+      const fullAnswer = fillTemplate(model.afmt);
+      // afmt contient souvent {{FrontSide}} + <hr> + {{Back}}
+      // On extrait la partie après le <hr>
+      const hrMatch = fullAnswer.match(/<hr[^>]*>([\s\S]*)/i);
+      back = hrMatch ? hrMatch[1].trim() : fields[1];
+    } else {
+      front = fields[0];
+      back = fields[1];
+    }
+
+    // Nettoyage HTML Anki
+    front = cleanAnkiHtml(front);
+    back = cleanAnkiHtml(back);
+
+    if (front && back) {
+      cards.push({ front, back, tags: note.tags || [] });
+    }
+  }
+
+  return { decks: [{ folderName: deckName, cards }], total: cards.length };
+}
+
+function cleanAnkiHtml(s: string): string {
+  let out = s
+    // Images → notre format [image:nom]
+    .replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (_, src) => `[image:${src}]`)
+    // <br> → saut de ligne
+    .replace(/<br\s*\/?>/gi, "\n")
+    // <b>/<strong> → **
+    .replace(/<(?:b|strong)[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, (_, t) => `**${t}**`)
+    // <i>/<em> → *
+    .replace(/<(?:i|em)[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, (_, t) => `*${t}*`)
+    // <u> → garder le HTML pour le renderer
+    .replace(/<u[^>]*>([\s\S]*?)<\/u>/gi, (_, t) => `<u>${t}</u>`)
+    // <div>, <span> avec style → garder les spans de couleur
+    .replace(/<div[^>]*>([\s\S]*?)<\/div>/gi, "$1\n")
+    // Nettoyer les &nbsp;
+    .replace(/&nbsp;/gi, " ")
+    // Supprimer les balises restantes
+    .replace(/<\/?(?!span|u)\w+[^>]*>/gi, "")
+    .trim();
+  return out;
+}
+
+function escapeRegex(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // ─── Format Markdown "### Carte X [M] — Chap" ─────────────────────

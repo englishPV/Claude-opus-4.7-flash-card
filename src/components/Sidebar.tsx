@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useStore } from "../lib/store";
 import type { Folder, UUID } from "../lib/types";
-import { ChevronDown, ChevronRight, FolderIcon, FolderOpenIcon, ImageIcon, Plus } from "./icons";
+import { ChevronDown, ChevronRight, FolderIcon, FolderOpenIcon, ImageIcon, Plus, Trash } from "./icons";
 
 interface Props {
   selectedId: UUID | null;
@@ -9,11 +9,33 @@ interface Props {
 }
 
 export function Sidebar({ selectedId, onSelect }: Props) {
-  const { childrenOf, createFolder, moveFolder, data } = useStore();
+  const { childrenOf, createFolder, moveFolder, deleteFolder, data } = useStore();
   const roots = childrenOf(null);
   const [expanded, setExpanded] = useState<Set<UUID>>(() => new Set());
   const [rootOver, setRootOver] = useState(false);
   const [bottomOver, setBottomOver] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<UUID>>(() => new Set());
+
+  const toggleSelect = (id: UUID) => {
+    setSelected(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const batchDelete = () => {
+    if (selected.size === 0) return;
+    const count = selected.size;
+    if (!confirm(`Supprimer ${count} dossier${count > 1 ? "s" : ""} et tout leur contenu ?`)) return;
+    for (const id of selected) deleteFolder(id);
+    setSelected(new Set());
+    setSelectMode(false);
+    if (selected.has(selectedId || "")) onSelect(null);
+  };
+
+  const exitSelectMode = () => { setSelectMode(false); setSelected(new Set()); };
 
   const handleRootDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -34,19 +56,42 @@ export function Sidebar({ selectedId, onSelect }: Props) {
     <div className="flex flex-col h-full">
       <div className="px-3 py-2 flex items-center justify-between border-b border-app">
         <span className="text-xs uppercase tracking-wider text-muted font-medium">Dossiers</span>
-        <button
-          className="btn btn-ghost p-1.5"
-          title="Nouveau dossier racine"
-          onClick={() => {
-            const name = prompt("Nom du dossier ? (tu pourras ajouter un emoji ensuite)");
-            if (name) {
-              const f = createFolder(name, null);
-              onSelect(f.id);
-            }
-          }}
-        >
-          <Plus />
-        </button>
+        <div className="flex items-center gap-1">
+          {selectMode && selected.size > 0 && (
+            <button
+              className="btn btn-ghost p-1.5 text-[var(--bad)]"
+              title={`Supprimer ${selected.size} dossier${selected.size > 1 ? "s" : ""}`}
+              onClick={batchDelete}
+            >
+              <Trash /> <span className="text-xs">{selected.size}</span>
+            </button>
+          )}
+          {selectMode && (
+            <button className="btn btn-ghost p-1.5 text-xs" onClick={exitSelectMode}>
+              Annuler
+            </button>
+          )}
+          <button
+            className={`btn btn-ghost p-1.5 ${selectMode ? "bg-soft" : ""}`}
+            title={selectMode ? "Quitter la sélection" : "Sélection multiple"}
+            onClick={() => selectMode ? exitSelectMode() : setSelectMode(true)}
+          >
+            ☑
+          </button>
+          <button
+            className="btn btn-ghost p-1.5"
+            title="Nouveau dossier racine"
+            onClick={() => {
+              const name = prompt("Nom du dossier ? (tu pourras ajouter un emoji ensuite)");
+              if (name) {
+                const f = createFolder(name, null);
+                onSelect(f.id);
+              }
+            }}
+          >
+            <Plus />
+          </button>
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto py-1">
         {/* Accueil — drop target racine */}
@@ -84,6 +129,9 @@ export function Sidebar({ selectedId, onSelect }: Props) {
             onSelect={onSelect}
             expanded={expanded}
             setExpanded={setExpanded}
+            selectMode={selectMode}
+            selectedFolders={selected}
+            toggleSelect={toggleSelect}
           />
         ))}
 
@@ -106,7 +154,7 @@ export function Sidebar({ selectedId, onSelect }: Props) {
 }
 
 function Node({
-  folder, depth, selectedId, onSelect, expanded, setExpanded,
+  folder, depth, selectedId, onSelect, expanded, setExpanded, selectMode, selectedFolders, toggleSelect,
 }: {
   folder: Folder;
   depth: number;
@@ -114,6 +162,9 @@ function Node({
   onSelect: (id: UUID | null) => void;
   expanded: Set<UUID>;
   setExpanded: (s: Set<UUID>) => void;
+  selectMode: boolean;
+  selectedFolders: Set<UUID>;
+  toggleSelect: (id: UUID) => void;
 }) {
   const { childrenOf, createFolder, renameFolder, setFolderEmoji, deleteFolder, moveFolder, moveCard, allDescendantFolders, data } = useStore();
   const children = childrenOf(folder.id);
@@ -150,8 +201,8 @@ function Node({
           selectedId === folder.id ? "bg-soft" : "hover:bg-soft"
         } ${over ? "drop-target" : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={() => onSelect(folder.id)}
-        draggable
+        onClick={() => selectMode ? toggleSelect(folder.id) : onSelect(folder.id)}
+        draggable={!selectMode}
         onDragStart={(e) => {
           e.dataTransfer.setData("application/x-fc", JSON.stringify({ type: "folder", id: folder.id }));
           e.dataTransfer.effectAllowed = "move";
@@ -176,11 +227,24 @@ function Node({
           } catch {}
         }}
       >
-        <button onClick={toggle} className="text-muted shrink-0 p-0.5 -ml-0.5">
-          {children.length > 0
-            ? (isOpen ? <ChevronDown /> : <ChevronRight />)
-            : <span style={{ width: 16, display: "inline-block" }} />}
-        </button>
+        {selectMode ? (
+          <span
+            className={`shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+              selectedFolders.has(folder.id) ? "bg-[var(--info)] border-[var(--info)]" : "border-app"
+            }`}
+            onClick={(e) => { e.stopPropagation(); toggleSelect(folder.id); }}
+          >
+            {selectedFolders.has(folder.id) && (
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3"><path d="M5 12l5 5L20 7"/></svg>
+            )}
+          </span>
+        ) : (
+          <button onClick={toggle} className="text-muted shrink-0 p-0.5 -ml-0.5">
+            {children.length > 0
+              ? (isOpen ? <ChevronDown /> : <ChevronRight />)
+              : <span style={{ width: 16, display: "inline-block" }} />}
+          </button>
+        )}
         {folder.emoji ? (
           <span className="text-base leading-none shrink-0 w-4 text-center">{folder.emoji}</span>
         ) : (
@@ -241,6 +305,9 @@ function Node({
           onSelect={onSelect}
           expanded={expanded}
           setExpanded={setExpanded}
+          selectMode={selectMode}
+          selectedFolders={selectedFolders}
+          toggleSelect={toggleSelect}
         />
       ))}
     </div>
