@@ -3,6 +3,7 @@ import { useStore, uid, newSrs } from "../lib/store";
 import type { Card, UUID } from "../lib/types";
 import { RichText } from "../lib/render";
 import { ImageIcon, X } from "./icons";
+import { imageFileToDataUrl } from "../lib/images";
 
 interface Props {
   folderId: UUID;
@@ -222,12 +223,7 @@ function MathToolbar({ onInsert }: { onInsert: (s: string) => void }) {
 
 async function filesToDataUrls(files: File[]) {
   const entries = await Promise.all(files.map(async file => {
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
+    const dataUrl = await imageFileToDataUrl(file);
     return [file.name, dataUrl] as const;
   }));
   return Object.fromEntries(entries);

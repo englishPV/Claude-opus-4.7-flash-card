@@ -1,271 +1,314 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { Cloud, X, Download, Upload } from "./icons";
-import { FireSync } from "../lib/firebase";
+import { FireSync, type PushProgress } from "../lib/firebase";
 import type { User } from "firebase/auth";
 
-interface Progress {
-  step: string;
-  done: number;
-  total: number;
+function fmtDate(ts: number) {
+  return new Date(ts).toLocaleString("fr-FR", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
 }
 
 export function SyncPanel({ onClose }: { onClose: () => void }) {
   const { data, setData } = useStore();
   const [user, setUser] = useState<User | null>(null);
-  const [progress, setProgress] = useState<Progress | null>(null);
-  const [error, setError] = useState("");
-  const [lastSync, setLastSync] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<PushProgress | null>(null);
+  const [pullMsg, setPullMsg] = useState("");
+  const [cloudMeta, setCloudMeta] = useState<{ lastModified: number; imageCount?: number; cardCount?: number } | null>(null);
+  const [statusLine, setStatusLine] = useState("");
+  const [errorLines, setErrorLines] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const unsubRef = useRef<(() => void) | null>(null);
-  const didInit = useRef(false);
+  const autoPulled = useRef(false);
 
-  // Écoute l'état auth au montage
+  // ── Auth + auto-check cloud ──
   useEffect(() => {
-    unsubRef.current = FireSync.onAuthChange(async (u) => {
+    const unsub = FireSync.onAuthChange(async (u) => {
       setUser(u);
-      if (!u) return;
-      // Au login, récupère la méta pour afficher la date du dernier sync
-      try {
-        const meta = await FireSync.pullMeta(u.uid);
-        if (meta?.lastModified) setLastSync(meta.lastModified);
-      } catch {}
+      if (u && !autoPulled.current) {
+        autoPulled.current = true;
+        try {
+          const meta = await FireSync.pullMeta(u.uid);
+          setCloudMeta(meta);
+          if (meta) {
+            const localMax = Math.max(
+              0,
+              ...data.folders.flatMap(f => f.cards.map(c => c.updatedAt || 0))
+            );
+            if (meta.lastModified > localMax + 5000) {
+              setStatusLine(`☁️ Cloud plus récent (${fmtDate(meta.lastModified)}) — tu peux récupérer.`);
+            } else {
+              setStatusLine(`✅ Local à jour. Dernière synchro cloud : ${fmtDate(meta.lastModified)}`);
+            }
+          } else {
+            setStatusLine("Aucune donnée cloud pour ce compte.");
+          }
+        } catch {
+          setStatusLine("Impossible de vérifier le cloud.");
+        }
+      }
     });
-    return () => { unsubRef.current?.(); };
-  }, []);
+    return () => unsub();
+  }, []); // intentionnellement vide — on ne re-check qu'au login
 
-  const report = (step: string, done: number, total: number) =>
-    setProgress({ step, done, total });
-
-  const busy = progress !== null;
-
-  // ── Login ────────────────────────────────────────────────────────────────
   const doLogin = async () => {
-    setError("");
+    setErrorLines([]);
     try { await FireSync.login(); }
     catch (e: any) {
       if (e?.code === "auth/unauthorized-domain") {
-        setError(
-          `Domaine non autorisé dans Firebase.\n` +
-          `→ console.firebase.google.com → Authentication → Paramètres → Domaines autorisés\n` +
-          `→ Ajoute : ${window.location.hostname}\n\n` +
-          `En attendant, utilise l'Export/Import JSON.`
-        );
-      } else { setError("Connexion : " + (e?.message || e)); }
+        setErrorLines([
+          `Domaine non autorisé : ${window.location.hostname}`,
+          "→ console.firebase.google.com → Authentication → Paramètres → Domaines autorisés",
+          "→ Ajoute ce domaine puis réessaie.",
+          "",
+          "En attendant, utilise Export/Import JSON."
+        ]);
+      } else {
+        setErrorLines(["Erreur login : " + (e?.message || e)]);
+      }
     }
   };
 
-  // ── Push ────────────────────────────────────────────────────────────────
+  const doLogout = async () => {
+    await FireSync.logout();
+    setUser(null);
+    setCloudMeta(null);
+    setStatusLine("");
+    autoPulled.current = false;
+  };
+
+  // ── PUSH ──
   const doPush = async () => {
-    if (!user) return;
-    setError(""); setProgress({ step: "Démarrage…", done: 0, total: 1 });
-    try {
-      await FireSync.push(user.uid, data, report);
-      const meta = await FireSync.pullMeta(user.uid);
-      if (meta?.lastModified) setLastSync(meta.lastModified);
-      setProgress(null);
-    } catch (e: any) {
-      setError("Erreur : " + (e?.message || e));
-      setProgress(null);
-    }
-  };
+    if (!user || busy) return;
+    setBusy(true);
+    setErrorLines([]);
+    setProgress(null);
+    setStatusLine("Envoi des cartes…");
 
-  // ── Pull ────────────────────────────────────────────────────────────────
-  const doPull = async () => {
-    if (!user) return;
-    setError(""); setProgress({ step: "Démarrage…", done: 0, total: 1 });
     try {
-      const cloud = await FireSync.pull(user.uid, report);
-      setProgress(null);
-      if (!cloud) { setError("Aucune donnée sur le cloud."); return; }
-      const nCards = cloud.folders?.reduce((s, f) => s + (f.cards?.length || 0), 0) ?? 0;
-      const nImg = Object.keys(cloud.images || {}).length;
-      if (confirm(
-        `Cloud : ${nCards} cartes · ${nImg} images.\n` +
-        `Remplacer les données locales ?`
-      )) {
-        setData(() => cloud);
-        const meta = await FireSync.pullMeta(user.uid);
-        if (meta?.lastModified) setLastSync(meta.lastModified);
-      }
-    } catch (e: any) {
-      setError("Erreur : " + (e?.message || e));
-      setProgress(null);
-    }
-  };
+      const result = await FireSync.push(user.uid, data, (p) => {
+        setProgress({ ...p });
+        if (p.phase === "data") setStatusLine("Envoi des cartes et paramètres…");
+        else if (p.phase === "images") {
+          const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
+          setStatusLine(`Images : ${p.done}/${p.total} (${pct}%)${p.current ? ` — ${p.current}` : ""}`);
+        }
+        else if (p.phase === "done") setStatusLine("Finalisation…");
+      });
 
-  // ── Init automatique au premier push si cloud vide ──────────────────────
-  const doSmartSync = async () => {
-    if (!user || didInit.current) return;
-    didInit.current = true;
-    setError(""); setProgress({ step: "Vérification cloud…", done: 0, total: 1 });
-    try {
+      // Relit le meta pour afficher la date réelle
       const meta = await FireSync.pullMeta(user.uid);
-      if (!meta) {
-        // Première connexion, cloud vide → on push
-        setProgress({ step: "Premier push…", done: 0, total: 1 });
-        await FireSync.push(user.uid, data, report);
-        setProgress(null);
-        return;
-      }
-      const localCards = data.folders?.reduce((s, f) => s + (f.cards?.length || 0), 0) ?? 0;
-      const localImages = Object.keys(data.images || {}).length;
-      setProgress(null);
-      const choice = confirm(
-        `Cloud détecté (${new Date(meta.lastModified).toLocaleString()}, ${meta.imageCount ?? "?"} images).\n\n` +
-        `Local : ${localCards} cartes · ${localImages} images.\n\n` +
-        `OK = Récupérer le cloud   |   Annuler = Garder le local`
+      setCloudMeta(meta);
+
+      const imgCount = Object.keys(data.images || {}).length;
+      const cardCount = data.folders.reduce((s, f) => s + f.cards.length, 0);
+      setStatusLine(
+        `✅ Envoyé le ${meta ? fmtDate(meta.lastModified) : "maintenant"} — ${cardCount} cartes, ${imgCount} images`
       );
-      if (choice) await doPull();
-      else await doPush();
+      if (result.errors.length > 0) setErrorLines(result.errors);
     } catch (e: any) {
-      setError("Erreur sync : " + (e?.message || e));
+      setErrorLines(["Erreur push : " + (e?.message || e)]);
+    } finally {
+      setBusy(false);
       setProgress(null);
     }
   };
 
-  // ── Export JSON ─────────────────────────────────────────────────────────
+  // ── PULL ──
+  const doPull = async () => {
+    if (!user || busy) return;
+    setBusy(true);
+    setErrorLines([]);
+    setPullMsg("Démarrage…");
+
+    try {
+      const cloud = await FireSync.pull(user.uid, (msg) => {
+        setPullMsg(msg);
+        setStatusLine(msg);
+      });
+      if (!cloud) {
+        setStatusLine("Aucune donnée sur le cloud.");
+      } else {
+        const imgCount = Object.keys(cloud.images || {}).length;
+        const cardCount = cloud.folders.reduce((s, f) => s + f.cards.length, 0);
+        if (confirm(`Remplacer les données locales ? (${cardCount} cartes, ${imgCount} images sur le cloud)`)) {
+          setData(() => cloud);
+          const meta = await FireSync.pullMeta(user.uid);
+          setCloudMeta(meta);
+          setStatusLine(`✅ Données cloud chargées — ${cardCount} cartes, ${imgCount} images`);
+        } else {
+          setStatusLine("Annulé — données locales conservées.");
+        }
+      }
+    } catch (e: any) {
+      setErrorLines(["Erreur pull : " + (e?.message || e)]);
+    } finally {
+      setBusy(false);
+      setPullMsg("");
+    }
+  };
+
+  // ── Export JSON ──
   const exportJSON = () => {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const json = JSON.stringify(data, null, 2);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
     a.download = `flashcards-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
-    URL.revokeObjectURL(a.href);
   };
 
-  // ── Import JSON ─────────────────────────────────────────────────────────
   const importJSON = (file: File) => {
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result));
-        if (!parsed.folders || !parsed.settings) { setError("Fichier JSON invalide."); return; }
-        const nCards = parsed.folders.reduce((s: number, f: any) => s + (f.cards?.length || 0), 0);
-        const nImg = Object.keys(parsed.images || {}).length;
-        if (confirm(`Importer : ${nCards} cartes · ${nImg} images ?\nCela remplacera tes données locales.`)) {
-          setData(() => parsed);
-          onClose();
-        }
-      } catch { setError("Fichier JSON illisible."); }
+        if (parsed.folders && parsed.settings) {
+          if (confirm("Remplacer toutes les données locales ?")) {
+            setData(() => parsed);
+            setStatusLine("✅ Données importées depuis le fichier.");
+          }
+        } else alert("Fichier invalide.");
+      } catch { alert("JSON invalide."); }
     };
     reader.readAsText(file);
   };
 
-  const pct = progress && progress.total > 0
-    ? Math.round((progress.done / progress.total) * 100) : 0;
-
-  const totalCards = data.folders?.reduce((s, f) => s + (f.cards?.length || 0), 0) ?? 0;
-  const totalImages = Object.keys(data.images || {}).length;
+  const totalCards = data.folders.reduce((s, f) => s + f.cards.length, 0);
+  const totalImgs = Object.keys(data.images || {}).length;
+  const progressPct = progress && progress.total > 0
+    ? Math.round((progress.done / progress.total) * 100)
+    : 0;
 
   return (
     <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-3 fade-in"
-      onPointerDown={() => {}} onClick={onClose}>
-      <div className="bg-card border border-app rounded-xl w-full max-w-lg flex flex-col card-shadow overflow-hidden"
+      onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="bg-card border border-app rounded-xl w-full max-w-lg overflow-hidden flex flex-col card-shadow"
         onClick={e => e.stopPropagation()}>
 
-        {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-app">
           <div className="text-sm font-medium flex items-center gap-2"><Cloud /> Synchronisation</div>
-          <button className="btn btn-ghost p-1" onClick={onClose} disabled={busy}><X /></button>
+          <button className="btn btn-ghost p-1" onClick={onClose}><X /></button>
         </div>
 
-        <div className="overflow-y-auto p-4 space-y-5">
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
 
-          {/* ── État local ── */}
-          <div className="rounded-lg border border-app bg-soft px-3 py-2 text-xs text-muted flex gap-4 flex-wrap">
-            <span>💾 Local : <strong className="text-[var(--text)]">{totalCards} cartes · {totalImages} images</strong></span>
-            {lastSync && <span>☁️ Dernier sync : <strong className="text-[var(--text)]">{new Date(lastSync).toLocaleString()}</strong></span>}
+          {/* État local */}
+          <div className="text-xs text-muted border border-app rounded-lg px-3 py-2 flex gap-4">
+            <span>📦 Local : <strong>{totalCards}</strong> cartes</span>
+            <span>🖼 <strong>{totalImgs}</strong> images</span>
           </div>
 
-          {/* ── Progress ── */}
-          {progress && (
-            <div className="space-y-1.5">
-              <div className="text-sm text-soft">{progress.step}</div>
-              <div className="w-full h-2 rounded-full bg-soft overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-300"
-                  style={{ width: `${pct}%`, background: "var(--info)" }}
-                />
-              </div>
-              <div className="text-xs text-muted text-right">
-                {progress.done} / {progress.total}
-              </div>
-            </div>
-          )}
-
-          {/* ── Cloud Google ── */}
+          {/* Cloud Google */}
           <section>
-            <div className="text-xs uppercase tracking-wider text-muted font-medium mb-2">
-              Cloud Google — Firebase Storage (illimité)
-            </div>
+            <div className="text-xs uppercase tracking-wider text-muted font-medium mb-2">Cloud Google</div>
             {!user ? (
               <button className="btn btn-primary w-full py-3" onClick={doLogin} disabled={busy}>
                 <Cloud /> Se connecter avec Google
               </button>
             ) : (
-              <div className="space-y-2">
-                <div className="text-sm text-soft flex items-center justify-between">
-                  <span>✓ <strong>{user.email}</strong></span>
-                  <button className="btn btn-ghost text-xs" onClick={() => { FireSync.logout(); setUser(null); didInit.current = false; }}>
-                    Déconnecter
+              <div className="space-y-3">
+                <div className="text-sm">
+                  <span className="text-muted">Connecté : </span>
+                  <strong>{user.email}</strong>
+                </div>
+
+                {/* Info cloud */}
+                {cloudMeta && (
+                  <div className="text-xs text-muted border border-app rounded-lg px-3 py-2 flex gap-4">
+                    <span>☁️ Cloud : <strong>{cloudMeta.cardCount ?? "?"}</strong> cartes</span>
+                    <span>🖼 <strong>{cloudMeta.imageCount ?? "?"}</strong> images</span>
+                    <span>🕐 {fmtDate(cloudMeta.lastModified)}</span>
+                  </div>
+                )}
+
+                {/* Barre de progression */}
+                {progress && progress.total > 0 && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-muted">
+                      <span>{progress.phase === "images" ? `Images ${progress.done}/${progress.total}` : progress.phase}</span>
+                      <span>{progressPct}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-soft overflow-hidden">
+                      <div
+                        className="h-full bg-[var(--info)] transition-all duration-300"
+                        style={{ width: `${progressPct}%` }}
+                      />
+                    </div>
+                    {progress.current && (
+                      <div className="text-[11px] text-muted truncate">{progress.current}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Message de pull en cours */}
+                {pullMsg && <div className="text-xs text-muted">{pullMsg}</div>}
+
+                {/* Boutons */}
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn-primary flex-1 py-2.5"
+                    onClick={doPush}
+                    disabled={busy}
+                  >
+                    <Upload /> {busy && progress?.phase !== "done" ? "Envoi…" : "Envoyer →"}
+                  </button>
+                  <button
+                    className="btn flex-1 py-2.5"
+                    onClick={doPull}
+                    disabled={busy}
+                  >
+                    ← Récupérer
+                  </button>
+                  <button className="btn px-3" onClick={doLogout} disabled={busy} title="Se déconnecter">
+                    ✕
                   </button>
                 </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <button className="btn btn-primary col-span-1" onClick={doPush} disabled={busy} title="Envoyer cartes + images vers le cloud">
-                    <Upload /> Envoyer
-                  </button>
-                  <button className="btn col-span-1" onClick={doPull} disabled={busy} title="Récupérer cartes + images depuis le cloud">
-                    ↓ Récupérer
-                  </button>
-                  <button className="btn col-span-1" onClick={doSmartSync} disabled={busy} title="Laisser l'appli choisir la bonne direction">
-                    ⚡ Auto
-                  </button>
-                </div>
-                <div className="text-[11px] text-muted leading-relaxed">
-                  <strong>Envoyer</strong> : pousse tout vers le cloud (cartes + toutes les images).<br />
-                  <strong>Récupérer</strong> : écrase le local par le cloud.<br />
-                  <strong>Auto</strong> : compare cloud et local, te demande quoi faire.
+                <div className="text-[11px] text-muted">
+                  Les images sont découpées en blocs et envoyées progressivement. Laisse la page ouverte jusqu'à la fin.
                 </div>
               </div>
             )}
           </section>
 
-          {/* ── JSON ── */}
+          {/* Status */}
+          {statusLine && (
+            <div className={`rounded-lg border px-3 py-2 text-sm ${
+              statusLine.startsWith("✅")
+                ? "border-[var(--good)] bg-[color-mix(in_srgb,var(--good)_8%,transparent)]"
+                : "border-app bg-soft"
+            }`}>
+              {statusLine}
+            </div>
+          )}
+
+          {/* Erreurs */}
+          {errorLines.length > 0 && (
+            <div className="rounded-lg border border-[var(--bad)] bg-[color-mix(in_srgb,var(--bad)_8%,transparent)] p-3 text-sm space-y-1">
+              {errorLines.map((l, i) => <div key={i} className={l === "" ? "h-2" : ""}>{l}</div>)}
+              <button className="text-xs underline mt-1" onClick={() => setErrorLines([])}>Fermer</button>
+            </div>
+          )}
+
+          {/* Export / Import */}
           <section>
-            <div className="text-xs uppercase tracking-wider text-muted font-medium mb-2">
-              Export / Import JSON (sans Firebase)
-            </div>
+            <div className="text-xs uppercase tracking-wider text-muted font-medium mb-2">Export / Import local</div>
             <div className="flex gap-2">
-              <button className="btn flex-1" onClick={exportJSON} disabled={busy}>
-                <Download /> Exporter (.json)
+              <button className="btn flex-1" onClick={exportJSON}>
+                <Download /> Exporter JSON
               </button>
-              <button className="btn flex-1" onClick={() => fileRef.current?.click()} disabled={busy}>
-                <Upload /> Importer (.json)
+              <button className="btn flex-1" onClick={() => fileRef.current?.click()}>
+                <Upload /> Importer JSON
               </button>
+              <input ref={fileRef} type="file" accept=".json" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) importJSON(f); e.currentTarget.value = ""; }} />
             </div>
-            <input ref={fileRef} type="file" accept=".json" className="hidden"
-              onChange={e => { const f = e.target.files?.[0]; if (f) importJSON(f); e.currentTarget.value = ""; }} />
             <div className="text-[11px] text-muted mt-1.5">
-              Le fichier JSON inclut cartes + images. Parfait pour sauvegarder ou migrer entre appareils.
+              Sauvegarde complète en un fichier (cartes + images). Fonctionne sans connexion.
             </div>
           </section>
 
-          {/* ── Erreur ── */}
-          {error && (
-            <div className="rounded-lg border border-[var(--bad)] bg-[color-mix(in_srgb,var(--bad)_8%,transparent)] p-3 text-sm whitespace-pre-line">
-              ⚠️ {error}
-              <button className="block mt-2 text-xs underline" onClick={() => setError("")}>Fermer</button>
-            </div>
-          )}
-
-          {/* ── Note Firebase Storage ── */}
-          {user && (
-            <div className="text-[11px] text-muted leading-relaxed rounded border border-app p-2 bg-soft">
-              Les images sont stockées dans <strong>Firebase Storage</strong> (pas de limite de taille, optimisation automatique avant upload). Les cartes sont dans Firebase Realtime DB.
-              Si tu vois une erreur "storage/unauthorized", active Firebase Storage dans la console Firebase et ajoute des règles de sécurité.
-            </div>
-          )}
         </div>
       </div>
     </div>

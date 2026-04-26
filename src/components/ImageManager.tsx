@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../lib/store";
 import { Copy, ImageIcon, Trash, X } from "./icons";
+import { imageFileToDataUrl } from "../lib/images";
 
 export function ImageManager({ onClose }: { onClose: () => void }) {
   const { data, setData } = useStore();
@@ -12,12 +13,7 @@ export function ImageManager({ onClose }: { onClose: () => void }) {
   const importFiles = async (files: FileList | null) => {
     if (!files?.length) return;
     const entries = await Promise.all(Array.from(files).map(async file => {
-      const url = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      const url = await imageFileToDataUrl(file);
       return [file.name, url] as const;
     }));
     setData(d => { Object.assign(d.images, Object.fromEntries(entries)); });
