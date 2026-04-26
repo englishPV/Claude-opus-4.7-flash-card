@@ -4,11 +4,11 @@ import { Sidebar } from "./components/Sidebar";
 import { Browse } from "./components/Browse";
 import { SearchBar } from "./components/SearchBar";
 import { Stats } from "./components/Stats";
-import { SyncButton } from "./components/SyncButton";
+import { SyncPanel } from "./components/SyncPanel";
 import { CardEditor } from "./components/CardEditor";
 import { ImageManager } from "./components/ImageManager";
 import { SettingsDialog } from "./components/SettingsDialog";
-import { Sun, Moon, Menu, X, BarChart, Card, ImageIcon, SettingsIcon } from "./components/icons";
+import { Sun, Moon, Menu, X, BarChart, Card, ImageIcon, SettingsIcon, Cloud } from "./components/icons";
 import type { Card as TCard, UUID } from "./lib/types";
 
 function Shell() {
@@ -18,6 +18,7 @@ function Shell() {
   const [showStats, setShowStats] = useState(false);
   const [showImages, setShowImages] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSync, setShowSync] = useState(false);
   const [editFromSearch, setEditFromSearch] = useState<{ folderId: UUID; card: TCard } | null>(null);
 
   // Listen to selection events from Browse cards
@@ -61,14 +62,16 @@ function Shell() {
         <div className="flex-1 max-w-md">
           <SearchBar onOpen={handleSearchOpen} />
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 ml-auto">
           <button className="btn btn-ghost p-2" onClick={() => setShowStats(true)} title="Statistiques">
             <BarChart />
           </button>
           <button className="btn btn-ghost p-2" onClick={() => setShowImages(true)} title="Images">
             <ImageIcon />
           </button>
-          <SyncButton />
+          <button className="btn btn-ghost p-2" onClick={() => setShowSync(true)} title="Synchronisation">
+            <Cloud />
+          </button>
           <button className="btn btn-ghost p-2" onClick={() => setShowSettings(true)} title="Paramètres">
             <SettingsIcon />
           </button>
@@ -100,6 +103,7 @@ function Shell() {
       {showStats && <Stats onClose={() => setShowStats(false)} />}
       {showImages && <ImageManager onClose={() => setShowImages(false)} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {showSync && <SyncPanel onClose={() => setShowSync(false)} />}
       {editFromSearch && (
         <CardEditor
           folderId={editFromSearch.folderId}

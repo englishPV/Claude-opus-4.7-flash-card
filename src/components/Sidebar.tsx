@@ -13,6 +13,22 @@ export function Sidebar({ selectedId, onSelect }: Props) {
   const roots = childrenOf(null);
   const [expanded, setExpanded] = useState<Set<UUID>>(() => new Set());
   const [rootOver, setRootOver] = useState(false);
+  const [bottomOver, setBottomOver] = useState(false);
+
+  const handleRootDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setRootOver(false);
+    setBottomOver(false);
+    const raw = e.dataTransfer.getData("application/x-fc");
+    if (!raw) return;
+    try {
+      const p = JSON.parse(raw);
+      if (p.type === "folder") moveFolder(p.id, null);
+      else if (p.type === "card") {
+        // drop carte sur racine = ne rien faire (pas de dossier cible)
+      }
+    } catch {}
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -33,35 +49,32 @@ export function Sidebar({ selectedId, onSelect }: Props) {
         </button>
       </div>
       <div className="flex-1 overflow-y-auto py-1">
+        {/* Accueil — drop target racine */}
         <div
-          className={`px-3 py-2 text-sm cursor-pointer flex items-center gap-2 ${
+          className={`mx-1.5 px-3 py-2 text-sm rounded-lg cursor-pointer flex items-center gap-2 transition-colors ${
             selectedId === null ? "bg-soft" : "hover:bg-soft"
           } ${rootOver ? "drop-target" : ""}`}
           onClick={() => onSelect(null)}
           onDragOver={(e) => { e.preventDefault(); setRootOver(true); }}
           onDragLeave={() => setRootOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setRootOver(false);
-            const raw = e.dataTransfer.getData("application/x-fc");
-            if (!raw) return;
-            try {
-              const p = JSON.parse(raw);
-              if (p.type === "folder") moveFolder(p.id, null);
-            } catch {}
-          }}
+          onDrop={handleRootDrop}
         >
           <FolderOpenIcon />
           <span className="font-medium">Accueil</span>
+          {rootOver && <span className="ml-auto text-[10px] text-[var(--info)]">Lâcher pour libérer</span>}
         </div>
+
+        {/* Images */}
         <div
-          className="px-3 py-2 text-sm cursor-pointer flex items-center gap-2 hover:bg-soft"
+          className="mx-1.5 px-3 py-2 text-sm rounded-lg cursor-pointer flex items-center gap-2 hover:bg-soft"
           onClick={() => window.dispatchEvent(new CustomEvent("fc:open-images"))}
         >
           <ImageIcon />
           <span className="font-medium">Images</span>
           <span className="ml-auto text-xs text-muted">{Object.keys(data.images).length}</span>
         </div>
+
+        {/* Liste des dossiers */}
         {roots.map(r => (
           <Node
             key={r.id}
@@ -73,6 +86,20 @@ export function Sidebar({ selectedId, onSelect }: Props) {
             setExpanded={setExpanded}
           />
         ))}
+
+        {/* Zone de drop en bas — pour libérer un dossier de son parent */}
+        <div
+          className={`mx-1.5 mt-2 px-3 py-4 text-sm rounded-lg border border-dashed text-center transition-colors ${
+            bottomOver ? "drop-target border-[var(--info)]" : "border-app text-muted"
+          }`}
+          onDragOver={(e) => { e.preventDefault(); setBottomOver(true); }}
+          onDragLeave={() => setBottomOver(false)}
+          onDrop={handleRootDrop}
+        >
+          {bottomOver ? "Lâcher ici pour libérer le dossier" : "Dépose un dossier ici pour le remettre à la racine"}
+        </div>
+
+        <div className="h-4" />
       </div>
     </div>
   );

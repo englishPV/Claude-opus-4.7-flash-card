@@ -20,6 +20,7 @@ export function CardEditor({ folderId, card, onClose }: Props) {
   const [target, setTarget] = useState<"front" | "back">("front");
   const frontRef = useRef<HTMLTextAreaElement | null>(null);
   const backRef = useRef<HTMLTextAreaElement | null>(null);
+  const backdropDownRef = useRef(false);
 
   const save = () => {
     if (!front.trim() || !back.trim()) {
@@ -42,7 +43,14 @@ export function CardEditor({ folderId, card, onClose }: Props) {
   };
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-3 fade-in" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-3 fade-in"
+      onPointerDown={(e) => { backdropDownRef.current = e.target === e.currentTarget; }}
+      onPointerUp={(e) => {
+        if (backdropDownRef.current && e.target === e.currentTarget) onClose();
+        backdropDownRef.current = false;
+      }}
+    >
       <div className="bg-card border border-app rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col card-shadow" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-4 py-3 border-b border-app">
           <div className="text-sm font-medium">{card ? "Modifier la carte" : "Nouvelle carte"}</div>

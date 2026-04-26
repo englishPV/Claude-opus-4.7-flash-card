@@ -17,6 +17,7 @@ export const Sun = (p: SVGProps<SVGSVGElement>) => <I {...p}><circle cx="12" cy=
 export const Moon = (p: SVGProps<SVGSVGElement>) => <I {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></I>;
 export const Cloud = (p: SVGProps<SVGSVGElement>) => <I {...p}><path d="M17.5 19a4.5 4.5 0 1 0-1.42-8.78A6.5 6.5 0 0 0 4 13.5 4.5 4.5 0 0 0 8 19z"/></I>;
 export const Upload = (p: SVGProps<SVGSVGElement>) => <I {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></I>;
+export const Download = (p: SVGProps<SVGSVGElement>) => <I {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15v-12"/></I>;
 export const BarChart = (p: SVGProps<SVGSVGElement>) => <I {...p}><path d="M12 20V10M18 20V4M6 20v-6"/></I>;
 export const Play = (p: SVGProps<SVGSVGElement>) => <I {...p}><polygon points="5 3 19 12 5 21 5 3"/></I>;
 export const X = (p: SVGProps<SVGSVGElement>) => <I {...p}><path d="M18 6L6 18M6 6l12 12"/></I>;

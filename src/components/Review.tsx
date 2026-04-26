@@ -115,7 +115,7 @@ export function Review({ folder, includeChildren, onClose }: Props) {
         ref={scrollRef}
         className="flex-1 overflow-y-auto overflow-x-hidden"
       >
-        <div className="w-full max-w-3xl mx-auto px-4 md:px-8 py-6 space-y-4 min-w-0">
+        <div className={`w-full max-w-3xl mx-auto px-4 md:px-8 py-6 space-y-4 min-w-0 ${!showBack ? "min-h-full flex flex-col justify-center" : ""}`}>
 
           {/* Recto */}
           <div
@@ -149,9 +149,11 @@ export function Review({ folder, includeChildren, onClose }: Props) {
       {/* Actions — fixes en bas */}
       <div className="shrink-0 border-t border-app p-3 bg-card">
         {!showBack ? (
-          <button className="btn btn-primary w-full py-3" onClick={revealBack}>
-            Afficher la réponse <span className="text-xs opacity-60 ml-2">(Espace)</span>
-          </button>
+          <div className="flex justify-center">
+            <button className="btn btn-primary px-7 py-3 rounded-full min-w-52 max-w-sm" onClick={revealBack}>
+              Retourner la carte <span className="text-xs opacity-60 ml-2">Espace</span>
+            </button>
+          </div>
         ) : (
           <div className="grid grid-cols-4 gap-2">
             <RateBtn label="À revoir"  sub={intervals[1]} k="1" color="bad"  onClick={() => rate(1)} />
