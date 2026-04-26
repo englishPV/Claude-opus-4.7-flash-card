@@ -59,9 +59,26 @@ export const FireSync = {
   async push(uid: string, data: AppData) {
     ensureInit();
     const db = getDatabase(app!);
-    await set(ref(db, "users/" + uid + "/flashcardData"), JSON.stringify(data));
+    // Ne pas mettre tout le deck dans une seule string JSON : Realtime Database
+    // refuse les strings > 10 Mo. On stocke donc les images séparément.
+    const images = data.images || {};
+    const dataWithoutImages: AppData = { ...data, images: {} };
+    await set(ref(db, "users/" + uid + "/flashcardData"), dataWithoutImages);
+
+    const imagesRef = ref(db, "users/" + uid + "/flashcardImages");
+    await set(imagesRef, null);
+    for (const [id, url] of Object.entries(images)) {
+      const optimized = await optimizeDataUrlIfNeeded(url);
+      if (utf8Bytes(optimized) > 9_500_000) {
+        throw new Error(`Image trop lourde pour Firebase (> 10 Mo) : ${id}. Réimporte-la en plus petit ou compresse-la.`);
+      }
+      await set(ref(db, "users/" + uid + "/flashcardImages/" + encodeKey(id)), optimized);
+    }
+
     await set(ref(db, "users/" + uid + "/syncMeta"), {
       lastModified: Date.now(),
+      schema: 2,
+      imageCount: Object.keys(images).length,
     });
   },
   async pull(uid: string): Promise<AppData | null> {
@@ -70,7 +87,16 @@ export const FireSync = {
     const snap = await get(ref(db, "users/" + uid + "/flashcardData"));
     const v = snap.val();
     if (!v) return null;
-    try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; }
+    try {
+      const data = (typeof v === "string" ? JSON.parse(v) : v) as AppData;
+      const imgSnap = await get(ref(db, "users/" + uid + "/flashcardImages"));
+      const rawImages = imgSnap.val() || {};
+      data.images = {};
+      for (const [key, url] of Object.entries(rawImages)) {
+        data.images[decodeKey(key)] = String(url);
+      }
+      return data;
+    } catch { return null; }
   },
   async pullMeta(uid: string): Promise<{ lastModified: number } | null> {
     ensureInit();
@@ -79,3 +105,46 @@ export const FireSync = {
     return snap.val() || null;
   }
 };
+
+function encodeKey(id: string) {
+  return encodeURIComponent(id).replace(/\./g, "%2E");
+}
+
+function decodeKey(key: string) {
+  return decodeURIComponent(key);
+}
+
+function utf8Bytes(s: string) {
+  return new TextEncoder().encode(s).length;
+}
+
+async function optimizeDataUrlIfNeeded(dataUrl: string): Promise<string> {
+  if (!dataUrl.startsWith("data:image/")) return dataUrl;
+  if (utf8Bytes(dataUrl) < 2_500_000) return dataUrl;
+  try {
+    const img = await loadImage(dataUrl);
+    const maxSide = 1800;
+    const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, width, height);
+    const out = canvas.toDataURL("image/jpeg", 0.82);
+    return utf8Bytes(out) < utf8Bytes(dataUrl) ? out : dataUrl;
+  } catch {
+    return dataUrl;
+  }
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}

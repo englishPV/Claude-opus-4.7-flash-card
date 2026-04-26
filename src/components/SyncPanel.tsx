@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { Cloud, X, Download, Upload } from "./icons";
 import { FireSync } from "../lib/firebase";
@@ -10,6 +10,7 @@ export function SyncPanel({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const didAutoPullRef = useRef(false);
 
   // Auth
   const doLogin = async () => {
@@ -33,10 +34,30 @@ export function SyncPanel({ onClose }: { onClose: () => void }) {
 
   const unsubRef = useRef<(() => void) | null>(null);
 
-  useState(() => {
-    unsubRef.current = FireSync.onAuthChange(u => setUser(u));
+  useEffect(() => {
+    unsubRef.current = FireSync.onAuthChange(async (u) => {
+      setUser(u);
+      if (!u || didAutoPullRef.current) return;
+      didAutoPullRef.current = true;
+      setBusy(true);
+      try {
+        const cloud = await FireSync.pull(u.uid);
+        if (cloud) {
+          const localHasData = data.folders.length > 0 || Object.keys(data.images || {}).length > 0;
+          if (!localHasData || confirm("Données cloud trouvées. Les charger maintenant ?")) {
+            setData(() => cloud);
+          }
+        } else if (data.folders.length > 0 || Object.keys(data.images || {}).length > 0) {
+          await FireSync.push(u.uid, data);
+        }
+      } catch (e: any) {
+        setError("Erreur auto-sync : " + (e?.message || e));
+      } finally {
+        setBusy(false);
+      }
+    });
     return () => unsubRef.current?.();
-  });
+  }, [data, setData]);
 
   const doLogout = async () => {
     await FireSync.logout();
@@ -48,7 +69,7 @@ export function SyncPanel({ onClose }: { onClose: () => void }) {
     setBusy(true);
     try {
       await FireSync.push(user.uid, data);
-      alert("✅ Envoyé au cloud !");
+      alert("✅ Envoyé au cloud ! Les images sont stockées séparément pour éviter la limite Firebase de 10 Mo.");
     } catch (e: any) {
       setError("Erreur push : " + (e?.message || e));
     } finally { setBusy(false); }
