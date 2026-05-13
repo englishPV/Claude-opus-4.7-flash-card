@@ -12,9 +12,12 @@
     "@types/katex": "^0.16.8",
     "clsx": "2.1.1",
     "firebase": "^12.12.1",
+    "fzstd": "^0.1.1",
+    "jszip": "^3.10.1",
     "katex": "^0.16.45",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "sql.js": "^1.14.1",
     "tailwind-merge": "3.4.0"
   },
   "devDependencies": {

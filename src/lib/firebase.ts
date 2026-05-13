@@ -202,9 +202,81 @@ export const FireSync = {
     const snap = await get(dbRef(db, `users/${uid}/flashcardData`));
     const v = snap.val();
     if (!v) return null;
-    let data: AppData;
+
+    let data: any;
     try { data = typeof v === "string" ? JSON.parse(v) : v; } catch { return null; }
-    if (!data.folders) return null;
+    if (!data) return null;
+
+    // Ensure folders exists
+    if (!data.folders) data.folders = [];
+
+    // MIGRATION — ancien format subjects/chapters (vieux site)
+    if (data.folders.length === 0 && data.subjects && Array.isArray(data.subjects)) {
+      onProgress?.("Migration depuis l'ancien format…");
+      const migrated: any[] = [];
+      for (const subject of data.subjects) {
+        if (!subject) continue;
+        const subjectFolder: any = {
+          id: `old-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`,
+          name: subject.title || subject.name || "Ancien dossier",
+          emoji: subject.emoji || undefined,
+          parentId: null,
+          createdAt: Date.now(),
+          cards: [],
+        };
+        // Support both subjects[].chapters[].cards[] and subjects[].cards[]
+        const allCards: any[] = [];
+        if (subject.chapters && Array.isArray(subject.chapters)) {
+          for (const chapter of subject.chapters) {
+            for (const card of (chapter.cards || [])) allCards.push(card);
+          }
+        }
+        if (subject.cards && Array.isArray(subject.cards)) {
+          for (const card of subject.cards) allCards.push(card);
+        }
+
+        for (const card of allCards) {
+          if (!card) continue;
+          const front = card.front || card.question || "";
+          const back = card.back || card.answer || card.response || "";
+          if (!front && !back) continue;
+          subjectFolder.cards.push({
+            id: card.id || `old-${Math.random().toString(36).slice(2, 12)}`,
+            front, back,
+            type: card.type || undefined,
+            tags: card.tags || [],
+            imageId: card.imageId || null,
+            createdAt: card.createdAt || Date.now(),
+            updatedAt: card.updatedAt || card.lastReviewed || Date.now(),
+            srs: card.srs ? {
+              ease: card.srs.ease || 2.5,
+              interval: card.srs.interval || 0,
+              reps: card.srs.reps || 0,
+              lapses: card.srs.lapses || 0,
+              due: card.srs.due || Date.now(),
+              lastReview: card.srs.lastReview || null,
+              state: card.srs.state || "new",
+              step: card.srs.step || 0,
+            } : {
+              ease: 2.5, interval: 0, reps: 0, lapses: 0, due: Date.now(),
+              lastReview: card.lastReviewed || null, state: "new", step: 0,
+            },
+          });
+        }
+        if (subjectFolder.cards.length > 0) migrated.push(subjectFolder);
+      }
+      data.folders = migrated;
+    }
+
+    // Ensure settings exist
+    if (!data.settings) {
+      data.settings = {
+        theme: "light", fontScaleFront: 1, fontScaleBack: 1,
+        newPerDay: 20, reviewsPerDay: 200,
+      };
+    }
+    if (!data.history) data.history = [];
+
     data.images = {};
 
     // 2. Manifest

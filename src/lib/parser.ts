@@ -63,93 +63,174 @@ export function parseAuto(text: string): ParseResult {
 }
 
 // ─── CrowdAnki / Anki JSON ─────────────────────────────────────────
+// Format: { name, notes: [{note_model_uuid, fields, tags}], note_models: [{crowdanki_uuid, flds, tmpls, type}], children: [...] }
 function parseCrowdAnki(text: string): ParseResult {
   const json = JSON.parse(text);
-  const deckName: string = json.name || "Import Anki";
-  const notes: any[] = json.notes || [];
 
-  // Construit une map note_model_uuid → template (qfmt / afmt)
-  const models = new Map<string, { qfmt: string; afmt: string; fields: string[] }>();
-  for (const nm of (json.note_models || [])) {
-    const fieldNames = (nm.flds || []).map((f: any) => f.name || "");
-    for (const tmpl of (nm.tmpls || [])) {
-      models.set(nm.crowdanki_uuid, {
-        qfmt: tmpl.qfmt || "{{Front}}",
-        afmt: tmpl.afmt || "{{Back}}",
+  // Build model registry — one model can have multiple templates → multiple cards per note.
+  type Tmpl = { qfmt: string; afmt: string };
+  type Model = { fields: string[]; templates: Tmpl[]; isCloze: boolean };
+  const models = new Map<string, Model>();
+
+  // CrowdAnki can have nested decks via "children". Walk recursively to collect all models.
+  const collectModels = (deck: any) => {
+    for (const nm of (deck.note_models || [])) {
+      const fieldNames = (nm.flds || []).map((f: any) => f.name || "");
+      const templates: Tmpl[] = (nm.tmpls || []).map((t: any) => ({
+        qfmt: t.qfmt || "{{Front}}",
+        afmt: t.afmt || "{{FrontSide}}<hr>{{Back}}",
+      }));
+      const key = nm.crowdanki_uuid || nm.name || String(Math.random());
+      models.set(key, {
         fields: fieldNames,
+        templates: templates.length > 0 ? templates : [{ qfmt: "{{Front}}", afmt: "{{FrontSide}}<hr>{{Back}}" }],
+        isCloze: nm.type === 1,
       });
     }
+    for (const child of (deck.children || [])) collectModels(child);
+  };
+  collectModels(json);
+
+  // Walk decks recursively, building one ParsedDeck per Anki deck.
+  const decks: ParsedDeck[] = [];
+  const walkDeck = (deck: any, prefix: string) => {
+    const name = prefix ? `${prefix} / ${deck.name}` : (deck.name || "Import Anki");
+    const cards: ParsedCard[] = [];
+    for (const note of (deck.notes || [])) {
+      const generated = renderCrowdNote(note, models);
+      cards.push(...generated);
+    }
+    if (cards.length > 0) decks.push({ folderName: name, cards });
+    for (const child of (deck.children || [])) walkDeck(child, name);
+  };
+  walkDeck(json, "");
+
+  return { decks, total: decks.reduce((s, d) => s + d.cards.length, 0) };
+}
+
+function renderCrowdNote(
+  note: any,
+  models: Map<string, { fields: string[]; templates: { qfmt: string; afmt: string }[]; isCloze: boolean }>
+): ParsedCard[] {
+  const fields: string[] = note.fields || [];
+  if (fields.length < 1) return [];
+  const model = models.get(note.note_model_uuid);
+  const tags: string[] = note.tags || [];
+
+  // Cloze: one card per cloze deletion
+  if (model?.isCloze || /\{\{c\d+::/.test(fields[0] || "")) {
+    return renderClozeNote(fields, tags);
   }
+
+  if (!model) {
+    // Unknown model → simple front/back
+    const front = cleanAnkiHtml(fields[0] || "");
+    const back = cleanAnkiHtml(fields[1] || "");
+    if (!front || !back) return [];
+    return [{ front, back, tags: tags.length ? tags : undefined }];
+  }
+
+  // For each template generate one card
+  const result: ParsedCard[] = [];
+  for (const tmpl of model.templates) {
+    const filled = (s: string) => fillCrowdTemplate(s, model.fields, fields);
+    const front = cleanAnkiHtml(filled(tmpl.qfmt));
+    let afmt = tmpl.afmt.replace(/\{\{\s*FrontSide\s*\}\}/gi, "");
+    let answer = cleanAnkiHtml(filled(afmt));
+    const hr = answer.match(/<hr[^>]*>([\s\S]*)/i);
+    if (hr) answer = cleanAnkiHtml(hr[1]);
+
+    if (!front.trim()) continue;
+    const back = answer.trim() || cleanAnkiHtml(fields[1] || "");
+    if (!back.trim()) continue;
+
+    result.push({ front: front.trim(), back: back.trim(), tags: tags.length ? tags : undefined });
+  }
+
+  // Fallback: if all templates produced nothing, use raw fields
+  if (result.length === 0 && fields.length >= 2) {
+    const front = cleanAnkiHtml(fields[0]);
+    const back = cleanAnkiHtml(fields[1]);
+    if (front && back) result.push({ front, back, tags: tags.length ? tags : undefined });
+  }
+
+  return result;
+}
+
+function renderClozeNote(fields: string[], tags: string[]): ParsedCard[] {
+  const clozeFieldIdx = fields.findIndex(f => /\{\{c\d+::/.test(f));
+  if (clozeFieldIdx < 0) return [];
+  const clozeText = fields[clozeFieldIdx];
+  const extraFields = fields.filter((_, i) => i !== clozeFieldIdx).filter(Boolean);
+
+  // Extract all unique cloze numbers
+  const numbers = new Set<number>();
+  for (const m of clozeText.matchAll(/\{\{c(\d+)::/g)) numbers.add(Number(m[1]));
+  if (numbers.size === 0) return [];
 
   const cards: ParsedCard[] = [];
-  for (const note of notes) {
-    const fields: string[] = note.fields || [];
-    if (fields.length < 2) continue;
-
-    const model = models.get(note.note_model_uuid);
-
-    // Fonction pour remplacer {{FieldName}} dans un template
-    const fillTemplate = (template: string) => {
-      let result = template;
-      if (model) {
-        for (let i = 0; i < model.fields.length && i < fields.length; i++) {
-          result = result.replace(new RegExp(`\\{\\{\\s*${escapeRegex(model.fields[i])}\\s*\\}\\}`, "g"), fields[i]);
-        }
-      }
-      // Fallback : si les {{...}} ne sont pas résolus, on met les fields bruts
-      if (/\{\{/.test(result)) {
-        result = fields[0]; // juste le front brut
-      }
-      return result;
-    };
-
-    let front: string;
-    let back: string;
-
-    if (model) {
-      front = fillTemplate(model.qfmt);
-      const fullAnswer = fillTemplate(model.afmt);
-      // afmt contient souvent {{FrontSide}} + <hr> + {{Back}}
-      // On extrait la partie après le <hr>
-      const hrMatch = fullAnswer.match(/<hr[^>]*>([\s\S]*)/i);
-      back = hrMatch ? hrMatch[1].trim() : fields[1];
-    } else {
-      front = fields[0];
-      back = fields[1];
-    }
-
-    // Nettoyage HTML Anki
-    front = cleanAnkiHtml(front);
-    back = cleanAnkiHtml(back);
-
+  for (const target of [...numbers].sort()) {
+    const frontText = clozeText.replace(/\{\{c(\d+)::([^{}]*?)(?:::([^{}]*?))?\}\}/g,
+      (_m, num, content, hint) => Number(num) === target ? (hint ? `[${hint}]` : "[…]") : content);
+    const backText = clozeText.replace(/\{\{c(\d+)::([^{}]*?)(?:::([^{}]*?))?\}\}/g,
+      (_m, num, content) => Number(num) === target ? `**${content}**` : content);
+    const fullBack = extraFields.length > 0 ? `${backText}\n\n${extraFields.join("\n\n")}` : backText;
+    const front = cleanAnkiHtml(frontText).trim();
+    const back = cleanAnkiHtml(fullBack).trim();
     if (front && back) {
-      cards.push({ front, back, tags: note.tags || [] });
+      cards.push({ front, back, tags: tags.length ? tags : undefined });
     }
   }
+  return cards;
+}
 
-  return { decks: [{ folderName: deckName, cards }], total: cards.length };
+function fillCrowdTemplate(template: string, fieldNames: string[], fieldValues: string[]): string {
+  let result = template;
+  for (let i = 0; i < fieldNames.length && i < fieldValues.length; i++) {
+    const name = escapeRegex(fieldNames[i]);
+    result = result.replace(new RegExp(`\\{\\{\\s*${name}\\s*\\}\\}`, "gi"), fieldValues[i]);
+    result = result.replace(new RegExp(`\\{\\{\\s*[a-z]+:${name}\\s*\\}\\}`, "gi"), fieldValues[i]);
+  }
+  // Conditionals
+  result = result.replace(/\{\{#([\w]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_m, name, block) => {
+    const idx = fieldNames.indexOf(name);
+    return (idx >= 0 && fieldValues[idx]?.trim()) ? block : "";
+  });
+  result = result.replace(/\{\{\^([\w]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_m, name, block) => {
+    const idx = fieldNames.indexOf(name);
+    return (idx < 0 || !fieldValues[idx]?.trim()) ? block : "";
+  });
+  result = result.replace(/\{\{[^}]+\}\}/g, "");
+  return result;
 }
 
 function cleanAnkiHtml(s: string): string {
+  if (!s) return "";
   let out = s
-    // Images → notre format [image:nom]
-    .replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (_, src) => `[image:${src}]`)
-    // <br> → saut de ligne
-    .replace(/<br\s*\/?>/gi, "\n")
-    // <b>/<strong> → **
-    .replace(/<(?:b|strong)[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, (_, t) => `**${t}**`)
-    // <i>/<em> → *
-    .replace(/<(?:i|em)[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, (_, t) => `*${t}*`)
-    // <u> → garder le HTML pour le renderer
-    .replace(/<u[^>]*>([\s\S]*?)<\/u>/gi, (_, t) => `<u>${t}</u>`)
-    // <div>, <span> avec style → garder les spans de couleur
-    .replace(/<div[^>]*>([\s\S]*?)<\/div>/gi, "$1\n")
-    // Nettoyer les &nbsp;
     .replace(/&nbsp;/gi, " ")
-    // Supprimer les balises restantes
-    .replace(/<\/?(?!span|u)\w+[^>]*>/gi, "")
-    .trim();
-  return out;
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p\s*>/gi, "\n\n")
+    .replace(/<p\b[^>]*>/gi, "")
+    .replace(/<\/div\s*>/gi, "\n")
+    .replace(/<div\b[^>]*>/gi, "")
+    .replace(/<(?:b|strong)[^>]*>([\s\S]*?)<\/(?:b|strong)>/gi, (_, t) => `**${t}**`)
+    .replace(/<(?:i|em)[^>]*>([\s\S]*?)<\/(?:i|em)>/gi, (_, t) => `*${t}*`)
+    .replace(/<u[^>]*>([\s\S]*?)<\/u>/gi, (_, t) => `<u>${t}</u>`)
+    .replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (_m, src) => {
+      let clean = src;
+      try { clean = decodeURIComponent(src); } catch {}
+      return `[image:${clean}]`;
+    })
+    .replace(/\[sound:[^\]]+\]/gi, "")
+    .replace(/<\/?(?!span|u\b)[a-z][^>]*>/gi, "")
+    .replace(/\n{3,}/g, "\n\n");
+  return out.trim();
 }
 
 function escapeRegex(s: string) {

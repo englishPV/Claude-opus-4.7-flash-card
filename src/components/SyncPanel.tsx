@@ -33,14 +33,21 @@ export function SyncPanel({ onClose }: { onClose: () => void }) {
           const meta = await FireSync.pullMeta(u.uid);
           setCloudMeta(meta);
           if (meta) {
-            const localMax = Math.max(
-              0,
-              ...data.folders.flatMap(f => f.cards.map(c => c.updatedAt || 0))
-            );
-            if (meta.lastModified > localMax + 5000) {
-              setStatusLine(`☁️ Cloud plus récent (${fmtDate(meta.lastModified)}) — tu peux récupérer.`);
+            const localHasCards = data.folders?.some(f => f.cards.length > 0);
+            // Si local est vide → pull automatique (ancien format ou nouveau)
+            if (!localHasCards && meta.lastModified > 0) {
+              setStatusLine("Importation automatique des données du cloud…");
+              doSilentPull(u.uid);
             } else {
-              setStatusLine(`✅ Local à jour. Dernière synchro cloud : ${fmtDate(meta.lastModified)}`);
+              const localMax = Math.max(
+                0,
+                ...(data.folders?.flatMap(f => f.cards.map(c => c.updatedAt || 0)) || [0])
+              );
+              if (meta.lastModified > localMax + 5000) {
+                setStatusLine(`☁️ Cloud plus récent (${fmtDate(meta.lastModified)}) — clique Récupérer.`);
+              } else {
+                setStatusLine(`✅ Local à jour. Dernière synchro : ${fmtDate(meta.lastModified)}`);
+              }
             }
           } else {
             setStatusLine("Aucune donnée cloud pour ce compte.");
@@ -80,6 +87,20 @@ export function SyncPanel({ onClose }: { onClose: () => void }) {
   };
 
   // ── PUSH ──
+  const doSilentPull = async (uid: string) => {
+    try {
+      const cloud = await FireSync.pull(uid, (msg) => setStatusLine(msg));
+      if (cloud?.folders?.length) {
+        setData(() => cloud);
+        const imgCount = Object.keys(cloud.images || {}).length;
+        const cardCount = cloud.folders.reduce((s, f) => s + f.cards.length, 0);
+        setStatusLine(`✅ Importé depuis le cloud — ${cardCount} cartes, ${imgCount} images.`);
+      }
+    } catch (e: any) {
+      setStatusLine("Erreur import auto : " + (e?.message || e));
+    }
+  };
+
   const doPush = async () => {
     if (!user || busy) return;
     setBusy(true);
